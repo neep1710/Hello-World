@@ -1,0 +1,81 @@
+rules_version = '2';
+
+// Principle: clients may READ what they need and WRITE only their own
+// harmless profile fields. Everything that grants access (subscriptions,
+// device binding, video sources) is written exclusively by the Admin SDK
+// (functions/scripts/admin.ts) or the getPlaybackToken Cloud Function,
+// both of which bypass these rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function verified() {
+      return signedIn() && request.auth.token.email_verified == true;
+    }
+
+    function validName(name) {
+      return name is string && name.size() > 0 && name.size() <= 80;
+    }
+
+    function validPhone(phone) {
+      return phone is string && phone.size() <= 20;
+    }
+
+    // ---- Student profile ------------------------------------------------
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name', 'email', 'phone', 'createdAt'])
+        && validName(request.resource.data.name)
+        && validPhone(request.resource.data.phone)
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.createdAt == request.time;
+
+      // boundDeviceId / boundAt are server-managed and cannot be touched.
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['name', 'phone', 'updatedAt'])
+        && validName(request.resource.data.name)
+        && validPhone(request.resource.data.phone)
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
+    }
+
+    // ---- Subscriptions: doc ID = lower-cased email ----------------------
+    // A student can read only the record matching their *verified* email.
+    match /subscriptions/{email} {
+      allow get: if verified() && request.auth.token.email.lower() == email;
+      allow list, write: if false;
+    }
+
+    // ---- Course catalogue (metadata only, no video URLs) ----------------
+    match /courses/{courseId} {
+      allow read: if verified() && resource.data.published == true;
+      allow write: if false;
+
+      match /chapters/{chapterId} {
+        allow read: if verified();
+        allow write: if false;
+      }
+
+      match /videos/{videoId} {
+        allow read: if verified();
+        allow write: if false;
+      }
+    }
+
+    // ---- Server-only collections ----------------------------------------
+    match /videoSources/{videoId} {
+      allow read, write: if false;
+    }
+
+    match /playbackLogs/{logId} {
+      allow read, write: if false;
+    }
+  }
+}
